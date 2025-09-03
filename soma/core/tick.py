@@ -9,6 +9,7 @@ from rich.console import Console
 from rich.table import Table
 
 from soma.cogs.self_notes.notes import SelfNotes
+from soma.sandbox import make_env, ACTIONS
 from .state import StateSnapshot
 from .events import JsonlEventLog
 from .store import EventStore
@@ -17,8 +18,13 @@ from .store import EventStore
 console = Console()
 
 
-def run_loop(ticks: int, seed: int, run_dir: Path, run_id: str) -> None:
-    """Run the SOMA loop for `ticks` steps (M1: with SQLite store + self-notes).
+def _select_action(seed: int) -> str:
+    # Deterministic: map the LCG seed to one of the ACTIONS
+    return ACTIONS[seed % len(ACTIONS)]
+
+
+def run_loop(ticks: int, seed: int, run_dir: Path, run_id: str, env_name: str = "grid-v0") -> None:
+    """Run the SOMA loop for `ticks` steps with a minimal sandbox.
 
     Artifacts in `run_dir`:
       - meta.json
@@ -26,11 +32,12 @@ def run_loop(ticks: int, seed: int, run_dir: Path, run_id: str) -> None:
       - events.sqlite
     """
     meta = {
-        "phase": "M1",
+        "phase": "M2",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "ticks": ticks,
         "seed": seed,
         "run_id": run_id,
+        "env": env_name,
     }
     (run_dir / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
@@ -38,31 +45,45 @@ def run_loop(ticks: int, seed: int, run_dir: Path, run_id: str) -> None:
     store = EventStore(db_path=run_dir / "events.sqlite", run_id=run_id)
     notes = SelfNotes(event_log=event_log, store=store)
 
+    env = make_env(env_name, size=9, n_objects=12, view_radius=1)
+
+    # Initial reset observation
     state = StateSnapshot(tick=0, rng_seed=seed, info={})
+    obs0 = env.reset(seed)
+    event_log.write({"type": "obs", "tick": state.tick, "obs": obs0})
+    store.write(event_type="obs", tick=state.tick, payload=obs0)
+    notes.note(kind="startup", payload={"message": "system alive", "env": env_name}, tick=state.tick)
 
-    table = Table(title="SOMA M1 — Hello Tick + Store + Notes")
+    table = Table(title="SOMA M2 — GridWorld v0")
     table.add_column("Tick")
-    table.add_column("Seed")
-    table.add_column("Notes")
-
-    # Initial self-note
-    notes.note(kind="startup", payload={"message": "system alive"}, tick=state.tick)
+    table.add_column("Action")
+    table.add_column("Seen (uniq)")
+    table.add_column("Pos")
 
     for _ in range(ticks):
-        note = f"tick {state.tick}: system alive"
+        action = _select_action(state.rng_seed)
+        obs, info = env.step(action)
+
+        summary = {
+            "pos": obs["agent"],
+            "unique": obs["summary"]["unique"],
+        }
+
         event: Dict[str, Any] = {
             "type": "tick",
             "tick": state.tick,
             "rng_seed": state.rng_seed,
-            "note": note,
+            "action": action,
+            "summary": summary,
         }
         event_log.write(event)
         store.write(event_type="tick", tick=state.tick, payload=event)
-        table.add_row(str(state.tick), str(state.rng_seed), note)
 
-        # Periodic self-note (every 5 ticks)
-        if state.tick % 5 == 0 and state.tick > 0:
-            notes.note(kind="heartbeat", payload={"tick": state.tick}, tick=state.tick)
+        # Occasional note when the agent pings or every 6 ticks
+        if action == "ping" or state.tick % 6 == 0:
+            notes.note(kind="perception", payload={"unique": summary["unique"]}, tick=state.tick)
+
+        table.add_row(str(state.tick), action, ",".join(summary["unique"]) or "-", f"({summary['pos']['x']},{summary['pos']['y']})")
 
         state = state.next()
 
