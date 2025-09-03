@@ -1,0 +1,1 @@
+# Self-notes cog package
