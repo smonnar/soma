@@ -1,0 +1,1 @@
+# Perception V2 package (feature extraction + compact embeddings)

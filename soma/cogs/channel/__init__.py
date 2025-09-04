@@ -1,0 +1,1 @@
+# Communicative Channel v0 — symbolic externalization

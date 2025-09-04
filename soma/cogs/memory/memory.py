@@ -11,22 +11,14 @@ import math
 class MemoryItem:
     tick: int
     vector: List[float]  # L2-normalized
-    meta: Dict[str, object]  # e.g., {"unique": [...], "counts": {...}, "action": "up"}
+    meta: Dict[str, object]
 
 
 class MemorySystem:
-    """Tiny in-memory episodic store with hashed bag-of-tokens embeddings.
-
-    - `embed(summary)`: maps token counts to a fixed-dim vector via hashing.
-    - `add(tick, summary, action)`: stores normalized vector + metadata.
-    - `query(vec, top_k, min_score)`: cosine similarity over the buffer.
-    """
-
     def __init__(self, dim: int = 64, max_items: int = 512):
         self.dim = dim
         self.buf: Deque[MemoryItem] = deque(maxlen=max_items)
 
-    # ---------------------- embedding utils ----------------------
     def _hash_idx(self, token: str) -> int:
         h = hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest()
         return int.from_bytes(h, "little") % self.dim
@@ -37,23 +29,33 @@ class MemorySystem:
         for token, c in counts.items():
             i = self._hash_idx(str(token))
             vec[i] += float(c)
-        # L2 normalize
         norm = math.sqrt(sum(v * v for v in vec))
         if norm > 0:
             vec = [v / norm for v in vec]
         return vec
 
-    # -------------------------- API -----------------------------
     def add(self, tick: int, summary: Dict[str, object], action: str | None) -> None:
         vec = self.embed(summary)
         meta = {"unique": summary.get("unique", []), "counts": summary.get("counts", {}), "action": action}
         self.buf.append(MemoryItem(tick=tick, vector=vec, meta=meta))
 
+    def add_vector(self, tick: int, vector: List[float], meta: Dict[str, object]) -> None:
+        # Ensure length and normalization
+        v = list(vector)
+        if len(v) != self.dim:
+            # pad/trim to fit
+            if len(v) < self.dim:
+                v = v + [0.0] * (self.dim - len(v))
+            else:
+                v = v[: self.dim]
+        n = math.sqrt(sum(x * x for x in v))
+        if n > 0:
+            v = [x / n for x in v]
+        self.buf.append(MemoryItem(tick=tick, vector=v, meta=meta))
+
     def query(self, vec: List[float], top_k: int = 3, min_score: float = 0.35) -> List[Tuple[int, float]]:
-        # cosine similarity since vectors are normalized
         def dot(a: List[float], b: List[float]) -> float:
             return sum(x * y for x, y in zip(a, b))
-
         scored: List[Tuple[int, float]] = []
         for item in self.buf:
             s = dot(vec, item.vector)

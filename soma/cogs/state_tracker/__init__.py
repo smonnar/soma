@@ -1,0 +1,1 @@
+# State Tracker v1 — minimal self-model (snapshot + rolling history)

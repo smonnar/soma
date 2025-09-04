@@ -9,21 +9,12 @@ DIR_CYCLE = ["up", "right", "down", "left"]
 
 
 class BehaviorPlanner:
-    """Map dominant drive → behavior → action proposal (heuristic v1).
-
-    Behaviors:
-      - curiosity → "explore": cycle directions, avoid immediate oscillation
-      - stability → "settle": prefer noop; if high change, step back (opposite last move)
-      - pattern_completion → "revisit": small local scan (alternating left/right)
-      - truth_seeking → "probe": ping; if just pinged, nudge up
-      - caregiver_alignment → "align": noop (placeholder)
-      - overload_regulation → "cooldown": noop
-    """
+    """Drive → behavior → action with exploration bias and boredom escape."""
 
     def __init__(self):
         self.recent_pos: Deque[Tuple[int, int]] = deque(maxlen=8)
         self.last_action: Optional[str] = None
-        self._alt = False  # tiny toggle for alternating patterns
+        self._alt = False
 
     def propose(
         self,
@@ -34,42 +25,51 @@ class BehaviorPlanner:
         curiosity: Dict[str, float | List[str]],
         matches: List[Tuple[int, float]],
         pos: Tuple[int, int],
+        least_visited: List[str],
+        boredom: float,
+        explore_pressure: float = 0.0,
+        settle_pressure: float = 0.0,
     ) -> Tuple[str, str]:
         self.recent_pos.append(pos)
-        novelty = float(curiosity.get("novelty", 0.0))
-        change = float(curiosity.get("change", 0.0))
+        b = float(boredom)
+        ep = float(explore_pressure)
+        sp = float(settle_pressure)
 
-        if dominant == "curiosity":
-            behavior = "explore"
+        def choose_cycle() -> str:
             base = (rng_seed + tick) % 4
             for i in range(4):
                 cand = DIR_CYCLE[(base + i) % 4]
                 if self.last_action and OPPOSITE.get(self.last_action) == cand:
-                    continue  # avoid immediate backtrack oscillation
-                action = cand
-                break
+                    continue
+                return cand
+            return DIR_CYCLE[base]
+
+        if dominant == "curiosity":
+            behavior = "explore"
+            if least_visited:
+                action = least_visited[0]
             else:
-                action = DIR_CYCLE[base]
+                action = choose_cycle() if ep < 0.7 else ("up" if (self.last_action != "up") else choose_cycle())
 
         elif dominant == "stability":
             behavior = "settle"
-            if change > 0.6 and self.last_action in OPPOSITE:
+            if b >= 0.5 and least_visited:
+                action = least_visited[0]
+            elif sp >= 0.6:
+                action = "noop"
+            elif self.last_action in OPPOSITE and b > 0.3:
                 action = OPPOSITE[self.last_action]
             else:
                 action = "noop"
 
         elif dominant == "pattern_completion":
             behavior = "revisit"
-            # small local scan left/right
             self._alt = not self._alt
             action = "left" if self._alt else "right"
 
         elif dominant == "truth_seeking":
             behavior = "probe"
-            if self.last_action == "ping":
-                action = "up"
-            else:
-                action = "ping"
+            action = "up" if self.last_action == "ping" else "ping"
 
         elif dominant == "caregiver_alignment":
             behavior = "align"
