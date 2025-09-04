@@ -18,4 +18,5 @@ class SelfNotes:
         if tick is not None:
             event["tick"] = tick
         self.event_log.write(event)
-        self.store.write(event_type="note", tick=tick or -1, payload=event)
+        store_tick = tick if tick is not None else -1
+        self.store.write(event_type="note", tick=store_tick, payload=event)

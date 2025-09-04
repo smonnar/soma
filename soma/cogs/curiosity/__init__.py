@@ -1,0 +1,1 @@
+# Curiosity engine package (novelty/rarity/change metrics)

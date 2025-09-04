@@ -19,15 +19,15 @@ def run(
     n_objects: int = typer.Option(12, help="Number of objects to place"),
     view_radius: int = typer.Option(1, help="Agent view radius"),
 ):
-    """Run the SOMA core loop (M3)."""
+    """Run the SOMA core loop (M7)."""
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    out_dir = runs_dir / f"m3_{run_id}"
+    out_dir = runs_dir / f"m7_{run_id}"
     out_dir.mkdir(parents=True, exist_ok=False)
     run_loop(
         ticks=ticks,
         seed=seed,
         run_dir=out_dir,
-        run_id=f"m3_{run_id}",
+        run_id=f"m7_{run_id}",
         env_name=env,
         size=size,
         n_objects=n_objects,
