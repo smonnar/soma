@@ -1,8 +1,8 @@
 ---
 
-# **SOMA: A Self-Organizing Mechanomorphic Agent**
+# SOMA: A Self-Organizing Mechanomorphic Agent
 
-**Toward the Development of Machine-Native Cognition**
+Toward the Development of Machine-Native Cognition
 
 ---
 
