@@ -1,81 +1,128 @@
 from __future__ import annotations
 
 from pathlib import Path
-import csv
+from typing import Dict, List, Tuple
 import json
+import statistics as stats
 import typer
-from rich.console import Console
-from rich.table import Table
-
-# Local imports
-from soma.eval.metrics import compute_metrics, load_meta
-from soma.eval.report import build_markdown, build_html
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
-console = Console()
+
+
+def _read_jsonl(path: Path) -> List[Dict]:
+    out: List[Dict] = []
+    if not path.exists():
+        return out
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            try:
+                out.append(json.loads(line))
+            except Exception:
+                continue
+    return out
+
+
+def _p95(values: List[float]) -> float:
+    if not values:
+        return 0.0
+    arr = sorted(values)
+    i = max(0, int(round(0.95 * (len(arr) - 1))))
+    return float(arr[i])
+
+
+def _simpson_diversity(counts: Dict[str, int]) -> float:
+    N = sum(counts.values())
+    if N <= 1:
+        return 0.0
+    s = 0.0
+    for c in counts.values():
+        p = c / N
+        s += p * p
+    return float(1.0 - s)
 
 
 @app.command()
-def run(run_dir: Path = typer.Argument(..., help="Path to a single run directory (e.g., runs/m10care_...)")):
-    """Compute metrics and write report.md + report.html (+ ticks.csv)."""
+def eval_run(run_dir: Path = typer.Argument(..., help="Path to runs/<id>")) -> None:
     run_dir = Path(run_dir)
-    if not run_dir.exists():
-        raise typer.BadParameter(f"Run directory not found: {run_dir}")
+    events = _read_jsonl(run_dir / "events.jsonl")
+    meta = json.loads((run_dir / "meta.json").read_text(encoding="utf-8")) if (run_dir / "meta.json").exists() else {}
+    tags_path = run_dir / "caregiver_tags.json"
+    caregiver_tags = json.loads(tags_path.read_text(encoding="utf-8")) if tags_path.exists() else {}
 
-    m = compute_metrics(run_dir)
+    # ------ metrics ------
+    novs: List[float] = []
+    top_sims: List[float] = []
+    sym_counts: Dict[str, int] = {}
+    sym_sequence: List[List[str]] = []
+    self_model_refs = 0
+    rows_with_cg_gloss = 0
 
-    # Write artifacts
-    (run_dir / "report.md").write_text(build_markdown(m), encoding="utf-8")
-    (run_dir / "report.html").write_text(build_html(m), encoding="utf-8")
+    for ev in events:
+        if ev.get("type") != "tick":
+            continue
+        cur = ev.get("curiosity", {})
+        nov = float(cur.get("novelty", 0.0))
+        novs.append(nov)
+        rec = ev.get("recall", [])
+        if rec:
+            top_sims.append(float(rec[0].get("score", 0.0)))
+        ch = ev.get("channel", {})
+        toks = ch.get("tokens", []) or []
+        if toks:
+            for t in toks:
+                sym_counts[t] = sym_counts.get(t, 0) + 1
+        sym_sequence.append(list(toks))
+        if ev.get("state"):
+            self_model_refs += 1
+        if ch.get("caregiver_gloss"):
+            rows_with_cg_gloss += 1
 
-    # CSV of per-tick rows
-    rows = m.get("rows", [])
-    if rows:
-        csv_path = run_dir / "ticks.csv"
-        with csv_path.open("w", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(
-                f,
-                fieldnames=[
-                    "tick",
-                    "drive",
-                    "behavior",
-                    "action",
-                    "novelty",
-                    "boredom",
-                    "top_sim",
-                    "coverage",
-                    "symbols",
-                ],
-            )
-            w.writeheader()
-            for r in rows:
-                w.writerow(r)
+    novelty_mean = float(stats.mean(novs)) if novs else 0.0
+    novelty_p95 = _p95(novs)
+    high_novelty_rate = float(sum(1 for x in novs if x >= 1.0) / len(novs)) if novs else 0.0
 
-    # Console summary
-    meta = load_meta(run_dir)
-    table = Table(title=f"SOMA Eval — {meta.get('run_id', run_dir.name)}")
-    table.add_column("Metric")
-    table.add_column("Value")
+    # memory reuse helpful: proportion of recalled ticks with top_sim >= 0.5
+    reuse_total = len(top_sims)
+    reuse_helpful = sum(1 for s in top_sims if s >= 0.5)
+    reuse_ratio = float(reuse_helpful / reuse_total) if reuse_total else 0.0
 
-    nov = m.get("novelty", {})
-    mem = m.get("memory", {})
-    sym = m.get("symbols", {})
-    care = m.get("caregiver", {})
-    counts = m.get("counts", {})
+    # symbolic continuity: fraction of consecutive emissions sharing at least one token
+    cont_hits = 0
+    cont_pairs = 0
+    prev = None
+    for toks in sym_sequence:
+        if prev is not None:
+            if prev or toks:
+                cont_pairs += 1
+                if set(prev) & set(toks):
+                    cont_hits += 1
+        prev = toks
+    symbolic_continuity = float(cont_hits / cont_pairs) if cont_pairs else 0.0
 
-    table.add_row("Ticks", str(counts.get("ticks", 0)))
-    table.add_row("Novelty mean / p95 / high-rate",
-                  f"{nov.get('mean',0.0):.3f} / {nov.get('p95',0.0):.3f} / {100.0*nov.get('high_rate',0.0):.1f}%")
-    if counts.get("ticks", 0) > 0:
-        table.add_row("Memory helpful ratio",
-                      f"{100.0*mem.get('helpful_ratio',0.0):.1f}%  ({mem.get('helpful_recall',0)} / {mem.get('any_recall',0)})")
-    table.add_row("Symbol kinds / Simpson / continuity",
-                  f"{sym.get('kinds',0)} / {sym.get('simpson',0.0):.3f} / {100.0*sym.get('continuity',0.0):.1f}%")
-    table.add_row("Caregiver: tags / rows w/ gloss",
-                  f"{care.get('tag_count',0)} / {care.get('rows_with_gloss',0)}")
+    simpson = _simpson_diversity(sym_counts)
 
-    console.print(table)
-    console.print(f"Wrote: {run_dir / 'report.md'}  and  {run_dir / 'report.html'}" )
+    report = []
+    report.append(f"# SOMA Run Report — {run_dir.name}\n")
+    report.append("## Meta\n")
+    report.append("```json\n" + json.dumps(meta, indent=2) + "\n````\n")
+    report.append("## Summary\n")
+    report.append(f"- Ticks: {len(novs)}")
+    report.append(f"- Novelty mean: {novelty_mean:.3f} | p95: {novelty_p95:.3f} | high-novelty rate: {high_novelty_rate*100:.2f}%")
+    report.append(f"- Memory reuse helpful ratio: {reuse_ratio*100:.2f}% ({reuse_helpful} / {reuse_total})")
+    report.append(f"- Symbol kinds: {len(sym_counts)} | Simpson diversity: {simpson:.3f}")
+    report.append(f"- Self-model references: {self_model_refs} ({(self_model_refs/len(novs))*100:.2f}% of ticks)")
+    report.append(f"- Symbolic continuity: {cont_hits}/{cont_pairs} ({symbolic_continuity*100:.2f}%)")
+    report.append(f"- Caregiver tags present: {'yes' if caregiver_tags else 'no'} | rows with caregiver gloss: {rows_with_cg_gloss}")
+
+    if sym_counts:
+        report.append("\n## Symbols\n\nToken | Count\n---|---")
+        for t, c in sorted(sym_counts.items(), key=lambda kv: kv[1], reverse=True):
+            report.append(f"{t} | {c}")
+
+    # write
+    out_md = run_dir / "report.md"
+    out_md.write_text("\n".join(report) + "\n", encoding="utf-8")
+    typer.echo(f"Wrote {out_md}")
 
 
 if __name__ == "__main__":

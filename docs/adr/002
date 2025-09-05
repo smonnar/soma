@@ -1,0 +1,15 @@
+# ADR 0002 — Planner v1 as Rule Library
+
+## Decision
+Implement a small behavior library (explore, settle, revisit, probe, align, cooldown) mapped from the dominant drive, with boredom gating and least-visited bias. No external rewards; behaviors consume drive pressures only.
+
+## Status
+Accepted (v1).
+
+## Context
+We prioritized interpretability and reproducibility over performance. The sandbox affords clear signals (novelty, staleness) that support rule-based policies.
+
+## Consequences
+- Pros: deterministic and easy to trace; robust to small changes in the sandbox.
+- Cons: limited optimality; can enter "settle" plateaus without added heuristics.
+- Mitigations: staleness monitor and boredom gating; later upgrades can swap behaviors behind the same interface.

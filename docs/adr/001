@@ -1,0 +1,15 @@
+# ADR 0001 — Drive Model as Leaky Integrators
+
+## Decision
+Represent internal drives (Curiosity, Stability, Pattern Completion, Truth-Seeking, Caregiver Alignment, Overload Regulation) as leaky integrators with simple coupling. Dominant drive each tick is the argmax over current levels.
+
+## Status
+Accepted (v1).
+
+## Context
+We need transparent dynamics that are easy to inspect, log, and scaffold. Gradient-based or black-box policies would reduce interpretability.
+
+## Consequences
+- Pros: simple, debuggable, and supports clear self-notes; easy to script scenarios.
+- Cons: limited expressivity; no learning in the drive dynamics themselves.
+- Mitigations: later phases can refine couplings or add learned components without breaking logs.
