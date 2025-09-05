@@ -18,7 +18,8 @@ from soma.cogs.perception.features import extract_features
 from soma.cogs.perception.embedder import PerceptionEmbedderV2
 from soma.cogs.working_memory.staleness import StalenessMonitor
 from soma.cogs.state_tracker.tracker import StateTracker
-from soma.cogs.channel.symbolic import SymbolicChannel  # <-- NEW
+from soma.cogs.caregiver.interface import CaregiverInterface
+from soma.cogs.channel.symbolic import SymbolicChannel
 from soma.sandbox import make_env
 from .state import StateSnapshot
 from .events import JsonlEventLog
@@ -63,7 +64,8 @@ def run_loop(
     embedder = PerceptionEmbedderV2(dim=64)
     stale = StalenessMonitor(size=size, alpha=0.2, novelty_low=0.15, max_noop=5, max_repeat=5)
     tracker = StateTracker(run_dir=run_dir, keep=128)
-    channel = SymbolicChannel(notes=notes)  # <-- NEW
+    channel = SymbolicChannel(notes=notes)
+    caregiver = CaregiverInterface(run_dir=run_dir, notes=notes, run_id=run_id)
 
     env = make_env(env_name, size=size, n_objects=n_objects, view_radius=view_radius)
 
@@ -126,7 +128,7 @@ def run_loop(
             dominant = max(drives.items(), key=lambda kv: kv[1])[0]
 
         # --- Channel emission (pre-step, based on current view & decisions) ---
-        tokens, gloss = channel.maybe_emit(
+        tokens, gloss, ext_pairs = channel.maybe_emit(
             tick=state.tick,
             novelty=float(cur["novelty"]),
             boredom=boredom,
@@ -137,6 +139,23 @@ def run_loop(
             noop_streak=int(st["noop_streak"]),
             reflex_triggers=triggers,
         )
+
+        # If interesting symbols, write a caregiver query
+        caregiver.maybe_query(
+            tick=state.tick,
+            tokens=tokens,
+            context={
+                "dominant": dominant,
+                "novelty": float(cur["novelty"]),
+                "boredom": boredom,
+                "unique": obs["summary"].get("unique", []),
+            },
+        )
+
+        # Ingest caregiver answers (if any) and update channel tags
+        new_tags = caregiver.poll_answers()
+        if new_tags:
+            channel.set_tags(caregiver.tags)
 
         # Step
         obs_next, info = env.step(final_action)
@@ -175,7 +194,7 @@ def run_loop(
             "staleness": {k: (round(v, 3) if isinstance(v, float) else v) for k, v in st.items()},
             "perception": {"features": feats},
             "state": snapshot,
-            "channel": {"tokens": tokens, "gloss": gloss},
+            "channel": {"tokens": tokens, "gloss": gloss, "caregiver_gloss": ext_pairs},
             "view_after": {"unique": obs_next["summary"]["unique"], "pos": obs_next["agent"]},
         }
         event_log.write(event)

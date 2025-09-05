@@ -1,0 +1,1 @@
+# Caregiver Interface v0 — query/answer plumbing via run_dir jsonl files

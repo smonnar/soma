@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Tuple, Any
+from typing import Any, Dict, List, Tuple
 
 from soma.cogs.self_notes.notes import SelfNotes
 
@@ -17,37 +17,30 @@ VOCAB: Dict[str, str] = {
 }
 
 
-def _unique_key(summary: Dict[str, Any]) -> Tuple[str, ...]:
-    # Stable signature of the current view's unique tokens
-    uniq = summary.get("unique", []) or []
-    return tuple(sorted(str(u) for u in uniq))
-
-
 @dataclass
-class ChannelState:
-    last_novelty: float = 1.0
-    last_unique: Tuple[str, ...] | None = None
+class _ChannelState:
     cooldown: int = 0
+    prev_boredom: float = 0.0
+    prev_novelty: float = 0.0
 
 
 class SymbolicChannel:
-    """Minimal symbolic externalization with a tiny vocabulary and conservative policy.
-
-    Policy highlights:
-      - Emit **N!** when novelty is very high.
-      - Emit **N↑** on a significant novelty uptick.
-      - Emit **Over!** when reflex indicates overload.
-      - Emit **Loop?** when noop_streak exceeds a threshold.
-      - Emit **?** when novelty is high *and* top recall similarity is also high (familiar-but-different).
-      - Emit **Stab↓** when boredom is high while Stability is not dominant.
-      - Emit **Pat→** when Pattern Completion dominates (placeholder until richer M12 puzzles).
-
-    Emissions are written as self-notes: kind="symbol".
+    """
+    Emits compact symbols about the agent's state with mild rate-limiting.
     """
 
-    def __init__(self, notes: SelfNotes, *, novelty_hi: float = 0.85, novelty_up: float = 0.25, boredom_hi: float = 0.7, recall_hi: float = 0.7, loop_noop: int = 6, cooldown_ticks: int = 2) -> None:
+    def __init__(
+        self,
+        notes: SelfNotes,
+        *,
+        novelty_hi: float = 0.80,
+        novelty_up: float = 0.20,
+        boredom_hi: float = 0.65,
+        recall_hi: float = 0.65,
+        loop_noop: int = 5,
+        cooldown_ticks: int = 3,  # widened from 1 to reduce spam
+    ) -> None:
         self.notes = notes
-        self.s = ChannelState()
         self.novelty_hi = float(novelty_hi)
         self.novelty_up = float(novelty_up)
         self.boredom_hi = float(boredom_hi)
@@ -55,7 +48,14 @@ class SymbolicChannel:
         self.loop_noop = int(loop_noop)
         self.cooldown_ticks = int(cooldown_ticks)
 
-    # -------- encoder/decoder (toy) --------
+        self.ext_tags: Dict[str, str] = {}
+        self.s = _ChannelState()
+
+    # external caregiver tags for tokens
+    def set_tags(self, tags: Dict[str, str]) -> None:
+        self.ext_tags = dict(tags or {})
+
+    # helpers
     @staticmethod
     def encode(tokens: List[str]) -> str:
         return " ".join(tokens)
@@ -64,7 +64,6 @@ class SymbolicChannel:
     def decode(s: str) -> List[str]:
         return [t for t in s.split() if t in VOCAB]
 
-    # -------- core policy --------
     def maybe_emit(
         self,
         *,
@@ -77,56 +76,58 @@ class SymbolicChannel:
         dominant: str,
         noop_streak: int,
         reflex_triggers: List[str],
-    ) -> Tuple[List[str], List[str]]:
+    ) -> Tuple[List[str], List[str], List[Tuple[str, str]]]:
+        """
+        Decide whether to emit symbols for this tick.
+        Returns (tokens, glosses, caregiver_pairs).
+        """
         tokens: List[str] = []
         gloss: List[str] = []
+        ext_pairs: List[Tuple[str, str]] = []
 
-        # Cooldown to avoid spam
-        if self.s.cooldown > 0:
-            self.s.cooldown -= 1
-        
-        # Compute simple conditions
-        top_sim = float(matches[0][1]) if matches else 0.0
-        uniq_key = _unique_key(summary)
-        last_n = float(self.s.last_novelty)
-        dn = novelty - last_n
-
-        # Rules
-        if novelty >= self.novelty_hi:
-            tokens.append("N!")
-        elif dn >= self.novelty_up and novelty >= 0.4:
-            tokens.append("N↑")
-
-        if "overload" in reflex_triggers:
+        # ----- rule: overload reflex
+        if any(t.lower().startswith("over") for t in reflex_triggers or []):
             tokens.append("Over!")
 
-        if noop_streak >= self.loop_noop:
-            tokens.append("Loop?")
+        # ----- rule: novelty spikes / rising novelty
+        if novelty >= self.novelty_hi:
+            tokens.append("N!")
+        elif novelty - self.s.prev_novelty >= self.novelty_up and novelty >= 0.4:
+            tokens.append("N↑")
 
-        # familiar but different → contradiction-ish
-        if novelty >= 0.5 and top_sim >= self.recall_hi:
-            # If the set of unique tokens changed from last observation, flag a mismatch
-            if self.s.last_unique is not None and uniq_key != self.s.last_unique:
-                tokens.append("?")
-
-        # Stability down when bored and not stability-dominant
-        if boredom >= self.boredom_hi and dominant != "stability":
+        # ----- rule: boredom (stability down) — emit on threshold crossing or rising boredom
+        emit_stab = (boredom >= self.boredom_hi) and (
+            boredom > self.s.prev_boredom or self.s.prev_boredom < self.boredom_hi
+        )
+        if emit_stab:
             tokens.append("Stab↓")
 
+        # ----- rule: contradiction / mismatch heuristic
+        # If memory says "this looks familiar" but novelty is still elevated, flag "?"
+        top_sim = matches[0][1] if matches else 0.0
+        if top_sim >= self.recall_hi and novelty >= 0.5:
+            tokens.append("?")
+
+        # ----- optional: pattern completion drive marker
         if dominant == "pattern_completion":
             tokens.append("Pat→")
 
-        # Deduplicate and apply cooldown
+        # ----- rate limiting via cooldown
         if tokens and self.s.cooldown == 0:
             self.s.cooldown = self.cooldown_ticks
             gloss = [VOCAB[t] for t in tokens if t in VOCAB]
-            # Write a self-note
+            # caregiver gloss pairs
+            for t in tokens:
+                if t in self.ext_tags:
+                    ext_pairs.append((t, self.ext_tags[t]))
+            # structured note
             self.notes.note(
                 kind="symbol",
                 payload={
                     "tick": tick,
                     "emit": tokens,
                     "gloss": gloss,
+                    "caregiver_gloss": ext_pairs,
                     "novelty": round(float(novelty), 3),
                     "boredom": round(float(boredom), 3),
                     "top_sim": round(float(top_sim), 3),
@@ -134,13 +135,13 @@ class SymbolicChannel:
                 tick=tick,
             )
         else:
-            tokens = []
-            gloss = []
+            # suppress this tick (cooldown active or no tokens)
+            tokens, gloss, ext_pairs = [], [], []
 
-        # Update memory
-        self.s.last_novelty = float(novelty)
-        self.s.last_unique = uniq_key
-        return tokens, gloss
+        # ----- update internal state for next tick
+        self.s.prev_boredom = float(boredom)
+        self.s.prev_novelty = float(novelty)
+        if self.s.cooldown > 0:
+            self.s.cooldown -= 1
 
-    def vocab(self) -> Dict[str, str]:
-        return dict(VOCAB)
+        return tokens, gloss, ext_pairs
